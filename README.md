@@ -33,6 +33,7 @@ chatbot/
     globals.css           # all styles, responsive + mobile
     page.js               # 'use client' chat UI: sidebar, bubbles, history
     api/chat/route.js     # POST /api/chat → calls local Ollama
+    api/status/route.js   # GET /api/status → Ollama/model health for the UI badge
 ```
 
 Data flow:
@@ -92,12 +93,17 @@ All values live in `.env.local`; restart `npm run dev` after changing them.
 
 ## 5. How to use / test
 
-1. Open the app: you should see "Start a conversation".
-2. Type a message → Enter or Send → typing dots → reply with Markdown + timestamp.
-3. `+ New Chat` creates a conversation; the sidebar lists and switches them.
-4. Reload → history persists in `localStorage`.
-5. Mobile: ☰ toggles the sidebar.
-6. API test without the browser:
+1. Open the app: you should see "How can I help you today?".
+2. Type a message → Enter or Send → typing dots + elapsed timer → reply with Markdown.
+   Shift + Enter adds a new line in the composer.
+3. Use the suggestion cards on the empty screen for a quick start.
+4. `+ New chat` creates a conversation; search, switch, or delete them in the sidebar.
+5. Copy any message and regenerate the last assistant reply from the message actions.
+6. The status badge shows whether Ollama is online and the model is installed; click it
+   to re-check. It refreshes automatically every 30 seconds.
+7. Reload → history persists in `localStorage`.
+8. Mobile: ☰ opens the sidebar as an overlay.
+9. API test without the browser:
 
    ```bash
    curl -X POST http://localhost:3000/api/chat \
@@ -107,7 +113,7 @@ All values live in `.env.local`; restart `npm run dev` after changing them.
 
    Expect `{"reply":"...","model":"deepseek-r1:14b"}`.
 
-7. Ollama test without Next.js:
+10. Ollama test without Next.js:
 
    ```bash
    curl http://localhost:11434/api/chat \
