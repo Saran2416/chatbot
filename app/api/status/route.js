@@ -1,39 +1,69 @@
 import { NextResponse } from 'next/server';
+import { fetchOllamaJson, getOllamaConfig, hasModel } from '../../lib/ollama';
 
 // GET /api/status
-// Reports whether Ollama is reachable and whether the configured model is installed.
-const DEFAULT_BASE_URL = 'http://localhost:11434';
-const DEFAULT_MODEL = 'deepseek-r1:14b';
-
+// Reports Ollama connectivity, switchable models, and which are installed/loaded.
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  const baseUrl = (process.env.OLLAMA_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const model = process.env.OLLAMA_MODEL || DEFAULT_MODEL;
+  const { baseUrl, defaultModel, models: names } = getOllamaConfig();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
+  const timeout = setTimeout(() => controller.abort(), 4000);
 
   try {
-    const res = await fetch(`${baseUrl}/api/tags`, {
-      cache: 'no-store',
-      signal: controller.signal
-    });
+    // /api/tags lists installed models; /api/ps lists loaded ones. Neither loads a model.
+    const [tagsResult, runningResult] = await Promise.allSettled([
+      fetchOllamaJson(`${baseUrl}/api/tags`, controller.signal),
+      fetchOllamaJson(`${baseUrl}/api/ps`, controller.signal)
+    ]);
 
-    if (!res.ok) {
-      return NextResponse.json({ online: false, installed: false, model, baseUrl });
+    const tags = tagsResult.status === 'fulfilled' ? tagsResult.value : null;
+    const running = runningResult.status === 'fulfilled' ? runningResult.value : null;
+
+    if (!tags) {
+      return NextResponse.json({
+        online: false,
+        installed: false,
+        model: defaultModel,
+        defaultModel,
+        models: names.map((name) => ({ name, installed: false, loaded: false })),
+        baseUrl
+      });
     }
 
-    const data = await res.json().catch(() => null);
-    const names = Array.isArray(data?.models)
-      ? data.models.map((m) => m?.name).filter((n) => typeof n === 'string')
+    const installedNames = Array.isArray(tags.models)
+      ? tags.models.map((m) => m?.name).filter((n) => typeof n === 'string')
       : [];
-    const installed =
-      names.includes(model) || names.some((name) => name.split(':')[0] === model);
+    const loadedNames = Array.isArray(running?.models)
+      ? running.models.map((m) => m?.name).filter((n) => typeof n === 'string')
+      : [];
 
-    return NextResponse.json({ online: true, installed, model, baseUrl });
+    const models = names.map((name) => ({
+      name,
+      installed: hasModel(installedNames, name),
+      loaded: hasModel(loadedNames, name)
+    }));
+
+    const installed = models.some((m) => m.name === defaultModel && m.installed);
+
+    return NextResponse.json({
+      online: true,
+      installed,
+      model: defaultModel,
+      defaultModel,
+      models,
+      baseUrl
+    });
   } catch {
-    return NextResponse.json({ online: false, installed: false, model, baseUrl });
+    return NextResponse.json({
+      online: false,
+      installed: false,
+      model: defaultModel,
+      defaultModel,
+      models: names.map((name) => ({ name, installed: false, loaded: false })),
+      baseUrl
+    });
   } finally {
     clearTimeout(timeout);
   }

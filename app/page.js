@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 
 const STORAGE_KEY = 'ollama-chat-conversations';
 const LEGACY_STORAGE_KEY = 'hf-chat-conversations';
+const MODEL_STORAGE_KEY = 'ollama-chat-model';
 
 const SUGGESTIONS = [
   {
@@ -116,7 +117,15 @@ const ICON_PATHS = {
     </>
   ),
   shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
-  arrow: <path d="M7 17L17 7M7 7h10v10" />
+  arrow: <path d="M7 17L17 7M7 7h10v10" />,
+  chevron: <path d="M6 9l6 6 6-6" />,
+  chip: (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+    </>
+  )
 };
 
 function Icon({ name, size = 18, className = '' }) {
@@ -164,8 +173,8 @@ function fallbackCopy(text) {
 
 const STATUS_LABELS = {
   checking: 'Checking',
-  online: 'Online',
-  missing: 'Model not installed',
+  online: 'Ready',
+  missing: 'Not installed',
   offline: 'Ollama offline'
 };
 
@@ -181,9 +190,13 @@ export default function Home() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [ready, setReady] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState({
     state: 'checking',
-    model: 'deepseek-r1:14b',
+    defaultModel: 'deepseek-r1:14b',
+    models: [],
     baseUrl: ''
   });
 
@@ -191,6 +204,7 @@ export default function Home() {
   const textareaRef = useRef(null);
   const abortRef = useRef(null);
   const stoppedRef = useRef(false);
+  const modelMenuRef = useRef(null);
 
   // Load saved history once, then allow persistence.
   useEffect(() => {
@@ -226,6 +240,18 @@ export default function Home() {
     (c.title || 'New chat').toLowerCase().includes(query.trim().toLowerCase())
   );
 
+  const displayModel = selectedModel || status.defaultModel || 'deepseek-r1:14b';
+  const selectedModelInfo = status.models.find((m) => m.name === displayModel);
+  const modelState =
+    status.state === 'checking'
+      ? 'checking'
+      : status.state === 'offline'
+        ? 'offline'
+        : selectedModelInfo?.installed
+          ? 'online'
+          : 'missing';
+  const statusLabel = STATUS_LABELS[modelState] || STATUS_LABELS.offline;
+
   // Live Ollama / model status
   const checkStatus = useCallback(async (showChecking = true) => {
     if (showChecking) setStatus((prev) => ({ ...prev, state: 'checking' }));
@@ -233,10 +259,10 @@ export default function Home() {
       const res = await fetch('/api/status', { cache: 'no-store' });
       const data = await res.json().catch(() => null);
       if (!data) throw new Error('bad response');
-      const state = !data.online ? 'offline' : data.installed ? 'online' : 'missing';
       setStatus({
-        state,
-        model: data.model || 'unknown',
+        state: data.online ? 'online' : 'offline',
+        defaultModel: data.defaultModel || data.model || 'deepseek-r1:14b',
+        models: Array.isArray(data.models) ? data.models : [],
         baseUrl: data.baseUrl || ''
       });
     } catch {
@@ -249,6 +275,59 @@ export default function Home() {
     const id = setInterval(() => checkStatus(false), 30000);
     return () => clearInterval(id);
   }, [checkStatus]);
+
+  // Restore the model choice and keep it valid as the configured list changes.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(MODEL_STORAGE_KEY);
+      if (saved) setSelectedModel(saved);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (status.models.length === 0) return;
+    setSelectedModel((prev) => {
+      if (prev && status.models.some((m) => m.name === prev)) return prev;
+      return status.defaultModel;
+    });
+  }, [status.models, status.defaultModel]);
+
+  useEffect(() => {
+    if (!selectedModel) return;
+    try {
+      localStorage.setItem(MODEL_STORAGE_KEY, selectedModel);
+    } catch {}
+  }, [selectedModel]);
+
+  // Close the model menu when clicking elsewhere.
+  useEffect(() => {
+    if (!modelMenuOpen) return undefined;
+    const onPointerDown = (e) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [modelMenuOpen]);
+
+  // Unload models when the tab or app is closed so they do not linger in RAM.
+  useEffect(() => {
+    const onPageHide = (event) => {
+      // Do not unload when the page is only entering the back/forward cache.
+      if (event.persisted) return;
+
+      const url = '/api/models/stop';
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url);
+      } else {
+        fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    };
+
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, []);
 
   // Elapsed timer during generation (local models can be slow).
   useEffect(() => {
@@ -287,6 +366,7 @@ export default function Home() {
       if (e.key === 'Escape') {
         setSidebarOpen(false);
         setConfirmDelete(null);
+        setModelMenuOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -320,6 +400,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          model: selectedModel || undefined,
           messages: history.map(({ role, content }) => ({ role, content }))
         }),
         signal: controller.signal
@@ -330,7 +411,12 @@ export default function Home() {
         throw new Error(data.error || `Request failed (${res.status})`);
       }
 
-      const aiMsg = { role: 'assistant', content: data.reply, time: Date.now() };
+      const aiMsg = {
+        role: 'assistant',
+        content: data.reply,
+        time: Date.now(),
+        model: data.model || displayModel
+      };
       setConversations((prev) =>
         prev.map((c) =>
           c.id === conversationId ? { ...c, messages: [...history, aiMsg] } : c
@@ -350,6 +436,7 @@ export default function Home() {
       clearTimeout(timer);
       if (abortRef.current === controller) abortRef.current = null;
       setIsLoading(false);
+      checkStatus(false);
     }
   }
 
@@ -360,6 +447,7 @@ export default function Home() {
     setError('');
     setInput('');
     setConfirmDelete(null);
+    setModelMenuOpen(false);
 
     const userMsg = { role: 'user', content: value, time: Date.now() };
     const updatedMessages = [...activeMessages, userMsg];
@@ -404,6 +492,34 @@ export default function Home() {
       prev.map((c) => (c.id === active.id ? { ...c, messages: history } : c))
     );
     generateReply(active.id, history);
+  }
+
+  function chooseModel(name) {
+    // Unload every other model right away; the selected one loads on the next message.
+    fetch('/api/models/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: name })
+    })
+      .then(() => checkStatus(false))
+      .catch(() => {});
+    setSelectedModel(name);
+    setModelMenuOpen(false);
+    setError('');
+  }
+
+  async function unloadAllModels() {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      const res = await fetch('/api/models/stop', { method: 'POST' });
+      if (!res.ok) throw new Error();
+      await checkStatus(false);
+    } catch {
+      setError('Could not unload models from memory.');
+    } finally {
+      setStopping(false);
+    }
   }
 
   function newChat() {
@@ -457,8 +573,6 @@ export default function Home() {
       setError('Could not copy to the clipboard.');
     }
   }
-
-  const statusLabel = STATUS_LABELS[status.state] || STATUS_LABELS.offline;
 
   return (
     <div className="app">
@@ -571,7 +685,7 @@ export default function Home() {
             <Icon name="shield" size={18} />
             <div>
               <strong>Private by design</strong>
-              <span>Chats stay in this browser. No cloud API keys.</span>
+              <span>Chats stay here. No cloud keys; models unload on close.</span>
             </div>
           </div>
         </div>
@@ -598,27 +712,120 @@ export default function Home() {
           </div>
 
           <div className="header-right">
-            <button
-              type="button"
-              className={`status-pill ${status.state}`}
-              onClick={() => checkStatus()}
-              title={
-                status.baseUrl
-                  ? `${status.baseUrl} · click to refresh`
-                  : 'Click to check Ollama status'
-              }
-              aria-live="polite"
-            >
-              <span className="status-dot" />
-              <span className="status-model">{status.model}</span>
-              <span className="status-divider" />
-              <span className="status-label">{statusLabel}</span>
-              <Icon
-                name="refresh"
-                size={13}
-                className={`status-refresh ${status.state === 'checking' ? 'spinning' : ''}`}
-              />
-            </button>
+            <div className="model-switcher" ref={modelMenuRef}>
+              <button
+                type="button"
+                className={`model-trigger ${modelState}`}
+                onClick={() => setModelMenuOpen((v) => !v)}
+                title={
+                  status.baseUrl
+                    ? `${status.baseUrl} · switch model`
+                    : 'Switch model'
+                }
+                aria-haspopup="menu"
+                aria-expanded={modelMenuOpen}
+                aria-live="polite"
+              >
+                <span className="status-dot" />
+                <span className="model-trigger-copy">
+                  <span className="status-model">{displayModel}</span>
+                  <span className="status-label">{statusLabel}</span>
+                </span>
+                <Icon
+                  name="chevron"
+                  size={14}
+                  className={`model-chevron ${modelMenuOpen ? 'open' : ''}`}
+                />
+              </button>
+
+              {modelMenuOpen && (
+                <div className="model-menu" role="menu">
+                  <div className="model-menu-head">
+                    <span>Choose model</span>
+                    <button
+                      type="button"
+                      className="menu-refresh"
+                      onClick={() => checkStatus()}
+                      aria-label="Refresh models"
+                      title="Refresh"
+                    >
+                      <Icon
+                        name="refresh"
+                        size={14}
+                        className={status.state === 'checking' ? 'spinning' : ''}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="model-options">
+                    {status.models.length === 0 ? (
+                      <div className="model-menu-empty">
+                        {status.state === 'checking'
+                          ? 'Checking Ollama…'
+                          : 'No models configured. Add them to OLLAMA_MODELS.'}
+                      </div>
+                    ) : (
+                      status.models.map((m) => {
+                        const current = m.name === displayModel;
+                        return (
+                          <button
+                            type="button"
+                            key={m.name}
+                            role="menuitemradio"
+                            aria-checked={current}
+                            className={`model-option ${current ? 'selected' : ''} ${
+                              m.installed ? '' : 'missing'
+                            }`}
+                            onClick={() => chooseModel(m.name)}
+                            disabled={isLoading}
+                            title={
+                              m.installed
+                                ? m.name
+                                : `Not installed. Run: ollama pull ${m.name}`
+                            }
+                          >
+                            <span className="model-option-icon">
+                              <Icon name="chip" size={16} />
+                            </span>
+                            <span className="model-option-copy">
+                              <strong>{m.name}</strong>
+                              <small>
+                                {m.loaded
+                                  ? 'Loaded in memory'
+                                  : m.installed
+                                    ? 'Ready · loads on next message'
+                                    : `Not installed · ollama pull ${m.name}`}
+                              </small>
+                            </span>
+                            {current && (
+                              <Icon name="check" size={15} className="model-check" />
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div className="model-menu-actions">
+                    <button
+                      type="button"
+                      className="menu-stop"
+                      onClick={unloadAllModels}
+                      disabled={stopping || isLoading}
+                      title="Unload all models from memory"
+                    >
+                      <Icon name="stop" size={12} />
+                      {stopping ? 'Unloading…' : 'Unload models from memory'}
+                    </button>
+                  </div>
+
+                  <div className="model-menu-foot">
+                    Closing this tab unloads the model. Switching unloads the previous one,
+                    and the selected model loads on your next message.
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -631,7 +838,7 @@ export default function Home() {
                 </div>
                 <h2>How can I help you today?</h2>
                 <p className="empty-sub">
-                  Ask anything. <span className="model-chip">{status.model}</span> runs locally —
+                  Ask anything. <span className="model-chip">{displayModel}</span> runs locally —
                   nothing leaves this machine.
                 </p>
 
@@ -656,7 +863,7 @@ export default function Home() {
                   ))}
                 </div>
 
-                {status.state === 'offline' && (
+                {modelState === 'offline' && (
                   <div className="setup-note">
                     <Icon name="alert" size={14} />
                     <span>
@@ -665,11 +872,12 @@ export default function Home() {
                     </span>
                   </div>
                 )}
-                {status.state === 'missing' && (
+                {modelState === 'missing' && (
                   <div className="setup-note">
                     <Icon name="alert" size={14} />
                     <span>
-                      Model not installed. Run <code>ollama pull {status.model}</code>.
+                      Model not installed. Run <code>ollama pull {displayModel}</code>, or
+                      switch models from the menu above.
                     </span>
                   </div>
                 )}
@@ -692,6 +900,9 @@ export default function Home() {
                     <div className="message-body">
                       <div className="message-meta">
                         <strong>{isUser ? 'You' : 'Assistant'}</strong>
+                        {!isUser && m.model && (
+                          <span className="message-model">{m.model}</span>
+                        )}
                         {m.time && <time>{formatTime(m.time)}</time>}
                       </div>
                       <div className={`bubble ${isUser ? 'user' : 'ai'}`}>
@@ -749,7 +960,8 @@ export default function Home() {
                     </button>
                   </div>
                   <div className="loading-hint">
-                    The first reply can take a few minutes while the model loads into memory.
+                    The first reply with {displayModel} can take a few minutes while the model
+                    loads into memory.
                   </div>
                 </div>
               </div>
@@ -781,7 +993,7 @@ export default function Home() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={`Message ${status.model}…`}
+              placeholder={`Message ${displayModel}…`}
               rows={1}
               maxLength={4000}
               aria-label="Message"

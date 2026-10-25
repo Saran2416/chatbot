@@ -1,12 +1,10 @@
 import { NextResponse } from 'next/server';
+import { getOllamaConfig } from '../../lib/ollama';
 
 // POST /api/chat
-// Body: { messages: [{ role: 'user'|'assistant'|'system', content: string }] }
+// Body: { model?: string, messages: [{ role: 'user'|'assistant'|'system', content: string }] }
 // Server calls the local Ollama instance (default http://localhost:11434).
 // No cloud API key is needed; the model runs on your machine.
-
-const DEFAULT_BASE_URL = 'http://localhost:11434';
-const DEFAULT_MODEL = 'deepseek-r1:14b';
 
 function toNumber(value, fallback) {
   const n = Number(value);
@@ -68,8 +66,19 @@ export async function POST(req) {
       return NextResponse.json({ error: 'Please enter a message.' }, { status: 400 });
     }
 
-    const baseUrl = (process.env.OLLAMA_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-    const model = process.env.OLLAMA_MODEL || DEFAULT_MODEL;
+    const { baseUrl, defaultModel, models: allowedModels } = getOllamaConfig();
+    const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
+    const model = requestedModel || defaultModel;
+
+    if (!allowedModels.includes(model)) {
+      return NextResponse.json(
+        {
+          error: `Model "${model}" is not enabled. Add it to OLLAMA_MODELS in .env.local and restart.`
+        },
+        { status: 400 }
+      );
+    }
+
     const apiKey = process.env.OLLAMA_API_KEY;
     const maxTokens = toNumber(process.env.OLLAMA_MAX_TOKENS, 512);
     const temperature = toNumber(process.env.OLLAMA_TEMPERATURE, 0.7);
